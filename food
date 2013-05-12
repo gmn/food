@@ -1,0 +1,1263 @@
+#!/usr/bin/php
+<?php
+/* #!/Applications/XAMPP/xamppfiles/bin/php */
+
+/* MAC note, 
+    may need to run: 'sudo xattr -d com.apple.quarantine /usr/bin/food' 
+
+if grep -q Darwin <(uname -a); then echo Yep is mac; else echo nope; fi
+*/
+
+define( "_debug", false );
+
+if ( _debug ) {
+    error_reporting(E_ALL);
+} else {
+    error_reporting(E_ALL ^ E_NOTICE);
+}
+
+//
+// Put the name of your database file here. Ok to leave as is. 
+//
+$db_name = 'food_diary.db3';
+
+//
+// Put the path you want your database file stored at here
+//
+
+// Mac or Lin
+//$db_loc_dir  = '/home/gnaughto/.logs/sqlite/';
+//$db_loc_dir  = '/Volumes/encrypted/logs/sqlite/';
+$db_loc_dir  = '/home/gnaughto/Private/logs/sqlite/';
+
+// Guided location
+$db_location = $db_loc_dir.$db_name;
+
+//
+// Put your home directory here
+//
+//$db_home_dir = '/Users/gnaughto/';
+$db_home_dir = '/home/gnaughto/';
+
+
+
+$db_temp_loc = $db_home_dir.'.'.$db_name;
+
+
+
+
+
+
+function line( $n =0, $newline =false )
+{
+    $s = '';
+    for ( $i = 0; $i < $n; $i+=4 )
+        $s .= '----';
+    
+    return $newline ? "$s\n" : $s;
+}
+
+function object_to_array ($Class)
+{
+    # Typecast to (array) automatically converts stdClass -> array.
+    $Class = (array)$Class;
+    
+    # Iterate through the former properties looking for any stdClass properties.
+    # Recursively apply (array).
+    foreach($Class as $key => $value)
+    {
+        if( is_object($value) && get_class($value)==='stdClass' ) 
+        {
+            $Class[$key] = self::object_to_array($value);
+        }
+    }
+    return $Class;
+}
+
+//=============================================================================
+static $db = FALSE;
+function dba_PDO( $query )
+{
+    global $db;
+    global $db_location;
+
+    try
+    {
+        $statement = $db->query( $query );
+    }
+    catch(PDOException $e)
+    {
+        echo $e->getMessage();
+    }
+
+    if ( stripos( $query, "insert" ) !== FALSE )
+        return $db->lastInsertId();
+
+    if ( !is_object( $statement ) )
+        return FALSE;
+
+    $A = array();
+    while( ($obj = $statement->fetchObject()) )
+    {
+        $A[] = object_to_array( $obj );
+    }
+
+    return $A;
+}
+
+function dba_SYSTEM( $query ) 
+{
+    global $db_location;
+
+    // clean & prepare query a bit
+    $query = trim( $query );
+    if ( $query[ strlen($query)-1 ] != ';' ) { $query .= ';'; }
+
+    // detect which type of quotes to use
+    if ( stripos( $query, '\"' ) !== FALSE ) { // "
+        $q = '"';
+    } else if ( stripos( $query, "\'" ) !== FALSE ) { // '
+        $q = "'";
+    } else if ( stripos( $query, "'" ) !== FALSE ) { // "
+        $q = '"';
+    } else {
+        $q = "'";
+    }
+
+    // 3 statement types, detected in this order: INSERT, SELECT, LEFTOVER
+
+    // INSERT
+    //  return last_insert_id
+    if ( stripos( $query, "INSERT" ) !== FALSE ) 
+    {
+        // the tablename always comes after the keyword INTO
+        $tokens = preg_split("/[\s\(\)]+/", $query, 0, PREG_SPLIT_NO_EMPTY | PREG_SPLIT_DELIM_CAPTURE);
+        $key = array_search( 'into', $tokens );
+        if ( false === $key ) {
+            $key = array_search( 'INTO', $tokens );
+            if ( false === $key ) {
+                return false; // malformed insert
+            }
+        }
+        $tablename = $tokens[ $key + 1 ];
+        
+        // attach to query, send both together
+        $s = "select max(last_insert_rowid()) from $tablename;";
+        $query = trim( $query );
+        if ( $query[ strlen($query)-1 ] != ';' ) { $query.=';'; }
+        $query .= $s;
+
+        $id=`echo $q$query$q | sqlite3 $db_location`;
+
+if ( _debug ) {
+    echo <<<EOL
+echo $q$query$q | sqlite3 $db_location
+
+EOL;
+    print_r( $id );
+    echo "IN INSERT\n";
+}
+        // check for errors
+        if ( strpos( $id, 'Error' ) !== false ) {
+            echo "$id\n";
+            return false;
+        }
+
+        return intval(trim($id));
+    }
+
+    // SELECT
+    //  return numbered rows of associative arrays
+    else if ( stripos( $query, "SELECT" ) !== FALSE ) 
+    {
+        // do query
+        $res=`echo $q$query$q | sqlite3 $db_location`;
+
+if ( _debug ) {
+    echo <<<EOL
+echo $q$query$q | sqlite3 $db_location
+
+EOL;
+    print_r( $res );
+    echo "IN SELECT\n";
+}
+        // check for errors
+        if ( strpos( $res, 'Error' ) !== false ) {
+            echo "$res\n";
+            return false;
+        }
+
+        $lines = explode( "\n", $res );
+        array_pop( $lines );
+
+        
+        // get column names
+        //  if columns given is *, columns of entire table are used
+        //  else given column names are used, in order
+        // FIXME: doesn't handle tablename.* type declarations
+        // FIXME: doesn't handle multiple tables eg.: select * from t1,t2
+        $col_names = array();
+
+
+        // ENTIRE_TABLE
+        if ( strpos( $query, '*' ) !== false ) 
+        {
+            // the tablename always comes after the keyword INTO
+            $tokens = preg_split("/[\s\(\),]+/", $query, 0, PREG_SPLIT_NO_EMPTY | PREG_SPLIT_DELIM_CAPTURE);
+            $key = array_search( 'from', $tokens );
+            $tablename = $tokens[ $key + 1 ];
+            $s=`echo 'pragma table_info($tablename);' | sqlite3 $db_location`;
+            $col_info_lines = explode( "\n", $s );
+            array_pop($col_info_lines);
+            foreach( $col_info_lines as $line ) { 
+                $b = explode( "|", $line );
+                $col_names[] = $b[1];
+            }
+        }
+        // SPECIFIC FIELDS
+        else
+        {
+            $tokens = preg_split("/[\s\(\),]+/", $query, 0, PREG_SPLIT_NO_EMPTY | PREG_SPLIT_DELIM_CAPTURE);
+            $i = 1; 
+            while ( stripos( $tokens[$i], 'from' ) !== 0 )
+            {
+                $col_names[] = $tokens[$i++];
+            }
+        }
+
+        // create return array
+        $A = array();
+        $row = 0;
+        foreach( $lines as $line ) 
+        { 
+            $A[ $row ] = array();
+            $r =& $A[ $row++ ];
+
+            $sploded = explode( '|', $line );
+            for ( $i = 0 ; $i < count($sploded); $i++ ) {
+                $r[ $col_names[$i] ] = $sploded[ $i ];
+            }
+        }
+
+if (_debug)
+    print_r($A);
+
+        return $A;
+    }
+
+
+    // EVERYTHING ELSE
+    $res=`echo $q$query$q | sqlite3 $db_location`;
+
+if ( _debug ) {
+    echo <<<EOL
+echo $q$query$q | sqlite3 $db_location
+
+EOL;
+    print_r( $res );
+    echo "IN EVERYTHING_ELSE\n";
+}
+    // check for errors
+    if ( strpos( $res, 'Error' ) !== false ) {
+        echo "$res\n";
+        return false;
+    }
+
+    return true;
+}
+
+// dba() is wrapper around dynamically selected function()
+try
+{
+    if ( $db === FALSE )
+        $db = new PDO('sqlite:'.$db_location);
+
+    if ( $db != false && !function_exists( "dba" ) ) {
+        function dba( $q ) { 
+            return dba_PDO($q);
+        }
+    }
+}
+catch(PDOException $e)
+{
+    //echo $e->getMessage();
+    if ( !function_exists( "dba" ) ) {
+        function dba( $q ) { 
+            return dba_SYSTEM($q); 
+        }
+    }
+}
+if ( _debug )
+    echo $db == false ? "Debug: using dba_SYSTEM\n" : "Debug: using dba_PDO\n";
+//=============================================================================
+
+
+
+function create_fresh_db()
+{
+    $schema = array();
+
+    $schema[] = 'DROP TABLE IF EXISTS eat;';
+    $schema[] =<<<EOL
+CREATE TABLE eat (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, 
+    day_id INTEGER,
+    time DATETIME,
+    food VARCHAR(100),
+    calories REAL,
+    fat REAL,
+    carbohydrates REAL,
+    protein REAL,
+    multiplier REAL,
+    food_id integer,
+    is_alcohol char(1) default 0 );
+EOL;
+    $schema[] = 'DROP TABLE IF EXISTS food;';
+    $schema[] =<<<EOL
+CREATE TABLE food (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, 
+    name VARCHAR(100),
+    calories REAL,
+    fat REAL,
+    carbohydrates REAL,
+    protein REAL,
+    portion_desc varchar(15),
+    is_alcohol char(1) default 0 );
+EOL;
+    $schema[] = 'DROP TABLE IF EXISTS day;';
+    $schema[] =<<<EOL
+CREATE TABLE day (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, 
+    date DATE,
+    notes TEXT,
+    weight REAL );
+EOL;
+    $schema[] = 'DROP TABLE IF EXISTS config;';
+    $schema[] =<<<EOL
+CREATE TABLE config (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, 
+    key varchar(50),
+    value varchar(2000) );
+EOL;
+    $schema[] = 'insert into config(key,value) values (\'current_day_id\',\'-1\');';
+    $foods = array( 'egg white'=>array(17,0,0.24,3.6),'olive oil'=>array(40,5.5,0,0,1,'tsp'),
+    'tortilla'=>array(110,1.5,22,2,2),'soy milk'=>array(110,5,8,7,8,'oz'),'pecan'=>array(196,20.4,3.9,2.6),
+    'OJ'=>array(110,0,27,0,8,'oz'),'greek olives'=>array( 45,4.5,1,0,5 ),'walnut'=>array(185,18.5,3.9,4.3),
+    'apple juice'=>array(110,0,28,0,8),'water shake'=>array(130,1.5,5,25),'red wine'=>array(125,0,3.84,.1),
+    'muscle milk'=>array(230,9,12,25),'shake'=>array(185,4,9,28.5),'brazil nuts'=>array(186,18.8,3.5,4),
+    'emergenc'=>array(25,0,6,0),'cottage cheese'=>array(80,1.5,5,12),'chicken'=>array(35,1.4,0,5.3), 
+    'iceberg lettuce'=>array(10,0,3,1,1,'cup'),'steak'=>array(146,4.77,0,24.2,4),'egg'=>array(74,5,.38,6.29),
+    'mrs grimes beans'=>array(110,1,21,6,4),'sauerkraut'=>array(5,0,1,1,1,'ounce')
+    );
+    foreach( $foods as $n=>$f ) { $s = 'insert into food(name,calories,fat,carbohydrates,protein';
+        if ( count($f) == 6 )
+            $s .= ',portion_desc';
+        if ( count($f) >= 5 ) { $f[4]=$f[4]==0?1:$f[4]; $f[0] /=(float)$f[4]; $f[1] /=(float)$f[4]; $f[2] /=(float)$f[4]; $f[3] /=(float)$f[4]; }
+        $s .= ')values(\''.$n.'\','.$f[0].','.$f[1].','.$f[2].','.$f[3];
+        if ( count($f) == 6 )
+            $s .= ',\''.$f[5].'\'';
+        $s .= ');';
+        $schema[] = $s;
+    }
+
+    for ( $i = 0 ; $i < count($schema); $i++ )
+    {
+        dba( $schema[$i] );
+    }
+}
+
+function get_config( $str )
+{
+    $r = dba( "select * from config where key = '$str';" );
+    if ( empty( $r ) )
+        return false;
+    return $r[0]['value'];
+}
+
+function print_help()
+{
+    global $argv;
+    $name = $argv[0];
+    $help =<<<EOL
+$name  -  A food diary calculator script. 
+          Keeps list of everything you've eaten. Prints macronutrient tallies.
+OPTIONS:                
+-f [match]              List known foods. Optionally limit results by %match%
+new [date][notes]       Start a new day. If no date given, today's date is used
+add|-a [name of food]   Add a food to list of foods 
+list [date][-v]         List the foods you had today (or on a certain date)
+-l   [date][-v]           
+-d [name of food]       Delete a food from stored foods.
+-r <food>               Replace/Edit a food's attributes
+
+eat <food> [mult][day]  Adds a food to list of eaten for today. If food info 
+                        is not stored, you will be prompted to enter it. 
+                        Multipier is by portion or by Oz. So if you drink
+                        8 ounces of orange juice, you enter 8.
+days [-v|-c]            List totals for every day. -v is verbose,-c outputs .CSV
+-e [day]                Edit items eaten for specified day (today if none given)
+find <food>             Lookup info for a food on the web.
+-m [day]                Change how much you've eaten of a food. [day] lists
+                        foods for specified day.
+-n [day][-a]            edit day's note. optionally can select different day 
+                        -a ammends existing note, instead of overwriting it.
+when|-w <string>        search for a food and show what days you've eaten it
+                        on, and how much.                   
+EOL;
+    echo "$help\n\n";
+    exit;
+}
+
+function yesno() {
+    $yn = trim(fread(STDIN, 100000));
+    return stripos( $yn, 'y' ) === 0;
+}
+
+// returns DB row of chosen food or '0'
+function query_food( $food, $add_if_not_found =true )
+{
+    $food = str_replace( array('"',"'"),'', trim($food) );
+
+    $r = dba( "select * from food where name = '$food';" );
+    if ( count( $r ) == 1 )
+        return $r[0];
+
+    $r = dba( "select * from food where name like '%$food%' order by id desc;" );
+
+    // new food
+    if ( empty( $r ) )
+    {
+        if ( !$add_if_not_found ) {
+            echo "\"$food\" not found\n";
+            return 0;
+        }
+        echo "\"$food\" not found, adding:\n";
+        if ( !($id=try_add_food( $food )) )
+            return 0;
+        $r = dba( "select * from food where id = $id;" );
+        return $r[0];
+    }
+
+    echo "did you mean?\n";
+    foreach( $r as $k=>$v )
+    {
+        $i = $k+1;
+        echo "  [$i] ".$v['name']."\n";
+    }
+    echo "  [0] to exit\nselection> ";
+    $k = trim(fread(STDIN, 1));
+    if ( $k == 0 )
+        return 0;
+
+    return $r[$k-1];
+}
+
+function list_stored_foods( $food =false )
+{
+    if ( $food ) {
+        $res = dba ( "select * from food where name like '%$food%' order by name asc;" );
+        if ( empty( $res ) ) {
+            echo "\"$food\" not found\n"; exit;
+        }
+    } else {
+        $res = dba ( "select * from food order by name asc;" );
+        if ( empty( $res ) ) {
+            echo "no foods stored\n"; exit;
+        }
+    }
+    echo "listing stored foods:\n";
+    $a = array( 'calories'=>'%d ','fat'=>'%3.2f ','carbohydrates'=>'%3.2f ','protein'=>'%3.2f ' );
+    $len = 0;
+    foreach( $res as $r ) {
+        $l = strlen( $r['name'] );
+        if ( $l > $len ) $len = $l;
+    }
+    $format = '%-'.$len.'s ';
+    foreach( $res as $r ) {
+        printf ( $format, $r['name'] );
+        foreach ( $a as $v=>$fmt ) {
+            printf("%6s ",sprintf($fmt, $r[$v]));
+        }
+        echo ' '.$r['portion_desc']."\n";
+    }
+}
+
+function try_add_food( $food )
+{
+    if ( empty( $food ) ) {
+        echo "cant name a food nothing \"\"\n";
+        return 0;
+    }
+
+    $food = str_replace( array('"',"'"),'', trim($food) );
+
+    $r = dba( "select * from food where name like '$food';" );
+    if ( ! empty( $r ) )
+    { 
+        echo "Food: \"$food\" already exists. Use -r to edit.\n";
+        return;
+    }
+    
+    echo "Calories> ";
+    $cal = trim(fread(STDIN, 100000));
+    echo "Fat> ";
+    $fat = trim(fread(STDIN, 100000));
+    echo "Carbohydrates> ";
+    $car = trim(fread(STDIN, 100000));
+    echo "Protein> ";
+    $pro = trim(fread(STDIN, 100000));
+    echo "Multiplier> ";
+    $mul = trim(fread(STDIN, 100000));
+    echo "Portion Description> ";
+    $por = trim(fread(STDIN, 100000));
+    echo "is alcohol? > ";
+    $alc = trim(fread(STDIN, 100000));
+    $alc = empty($alc) ? 0 : 1;
+
+    if ( $mul == 0 ) $mul = 1;
+    $cal /= $mul;
+    $fat /= $mul;
+    $car /= $mul;
+    $pro /= $mul;
+
+    $s = "insert into food(name,calories,fat,carbohydrates,protein,portion_desc,is_alcohol) values ('$food',$cal,$fat,$car,$pro,'$por',$alc);" ;
+    echo $s;
+    $insert_id = dba( $s );
+    echo "\n\"$food\" added, insert_id = $insert_id\n";
+    return $insert_id;
+}
+
+function try_delete_food( $food )
+{
+    $food = str_replace( array('"',"'"),'', trim($food) );
+
+    $r = dba( "select * from food where name like '$food' order by id desc;" );
+    if ( empty( $r ) )
+    { 
+        echo "Food: \"$food\" isn't in the database.\n";
+        return;
+    }
+    if ( count($r) > 1 ) {    
+        echo "Warning: more than one food: \"$food\" exists, deleting most recent\n";
+    }
+    echo "Are you sure you want to delete \"$food\" (Y/n)? ";
+    $yn = trim(fread(STDIN, 100000));
+    if ( stripos( $yn, "n" ) !== FALSE )
+        return;
+
+    $s = "delete from food where name like '$food' and id = ".$r[0]['id'].';';
+    echo $s;
+    dba( $s );
+    echo "\n\"$food\" deleted\n";
+}
+
+function start_new_day( $day =false, $notes =false )
+{
+    echo "are you sure you want to start a new day? ";
+    if ( ! yesno() )
+        return 0;
+
+    echo "Morning Weight? ";
+    $weight = trim(fread(STDIN, 100000));
+    $weight = empty($weight) ? 0.0 : $weight;
+
+    echo "Comment? ";
+    $notes = trim(fread(STDIN, 100000));
+    $notes = empty($notes) ? NULL : "'".addslashes($notes)."'";
+
+    echo "starting new day\n";
+    $s = "insert into day(weight,date";
+    if ( $notes )
+        $s .= ',notes';
+    $s.= ') values ('.$weight.',';
+    if ( ! $day )
+        $s .= 'date(\'now\')';
+    else
+        $s .= "'$day'";
+    if ( $notes )
+        $s .= ','.$notes;
+    $s .= ');';
+    echo "$s\n";
+
+
+    $insert_id = dba( $s );
+    dba("update config set value = '".(string)$insert_id."' where key = 'current_day_id';");
+    return $insert_id;
+}
+
+function eat_food( $food, $mult =false, $day =false )
+{
+    $r = query_food( $food );
+    if ( $r == 0 )
+        return;
+
+    $food = $r['name'];
+    echo "Eating \"$food\"\n";
+
+    if ( !$mult || empty($mult) )
+    {
+        if ( empty($r['portion_desc']) ) 
+            echo "What multiplier? (how many portions)> ";
+        else {
+            $por = $r['portion_desc'];
+            echo "What multiplier? (portion is \"$por\". How many?)> ";
+        }
+        $m = trim(fread(STDIN, 100000));
+        if ( $m == 0 || empty($m) )
+            return;
+    }
+    else
+        $m = $mult;
+
+
+    if ( $day ) {
+        $day = trim($day);
+        if ( strlen($day)==strlen('2012-10-14') ) 
+            $s = "select id from day where date = '$day' order by id desc;";
+        else 
+            $s = "select id from day where id = $day;";
+        $res = dba($s);
+        if ( empty( $res ) ) {
+            echo "day: '".$day."' not found\n";
+            return;
+        } 
+        $day_id = $res[0]['id'];
+    } else {
+        $day_id = get_config( 'current_day_id' );
+        if ( empty( $day_id ) || $day_id == -1 )
+            $day_id = start_new_day();
+    }
+
+    echo "Eating \"$food\" with multiplier: $m on day: $day_id\n";
+
+
+    $fat = $r['fat'] * $m;
+    $cal = $r['calories'] * $m;
+    $carb = $r['carbohydrates'] * $m;
+    $pro = $r['protein'] * $m;
+    $id = $r['id'];
+    $alc = empty($r['is_alcohol']) ? 0 : $r['is_alcohol'];
+
+    $s = "insert into eat (day_id,time,food,calories,fat,carbohydrates,protein,multiplier,food_id,is_alcohol) values ($day_id,datetime('now'),'$food',$cal,$fat,$carb,$pro,$m,$id,$alc);";
+//    echo "$s\n";
+    $insert_id = dba( $s );
+    echo "\n$cal Calories, $fat".'g fat, '.$carb.'g carbohydrates, '.$pro."g protein of \"$food\" eaten, multiplier: $m, insert_id = $insert_id, day_id = $day_id\n";
+}
+
+// today
+function list_foods_today( $day =false, $verborquiet =false )
+{
+    $verbose = false;
+    $quiet = false; // just prints day totals & nothing else when enabled
+    if ( $verborquiet ) {
+        if ( strpos( $verborquiet, "-v" ) === 0 ) {
+            $verbose = true;
+        } else if ( strpos( $verborquiet, "-q" ) === 0 ) {
+            $quiet = true;
+        }
+    } else if ( strlen($day) == 2 ) {
+        if ( strpos($day,"-v") === 0 ) {
+            $verbose = true;
+            $day = false;
+        } else if ( strpos($day,"-q") === 0 ) {
+            $day = false;
+            $quiet = true;
+        }
+    }
+
+    if ( $day !== false )
+    {
+        $day = trim($day);
+        if ( strlen($day)==strlen('2012-10-14') )
+            $s = "select * from day where date = '$day' order by id desc;"; 
+        else
+            $s = "select * from day where id = $day order by id desc;"; 
+        $d = dba( $s );
+        if ( empty( $d ) ) {
+            echo "day: '".$day."' not found\n";
+            return;
+        } 
+    } 
+    else 
+    {
+        $s = "select * from day order by id desc limit 1;";
+        $d = dba( $s );
+        if ( empty( $d ) ) {
+            echo "No days available\n";
+            return;
+        } 
+    }
+
+    $day_id = $d[0]['id'];
+    $s = "select * from eat where day_id = $day_id order by time asc;";
+    $r = dba( $s );
+    if ( empty( $r ) )
+    {
+        echo "no foods eaten on the day: '".$d[0]['date']."' [id = $day_id]\n";
+        return;
+    }
+
+    if (!$quiet) 
+        echo "listing foods eaten for the day: '".$d[0]['date']."' [id = ".$d[0]['id']."]\n";
+
+    if ( $verbose ) {
+        $notes = empty($d[0]['notes']) ? '<no notes>' : $d[0]['notes'];
+        echo "\nNOTES:\n$notes\n\n";
+    }
+
+    if ( !$quiet )
+        echo line(58,true);
+
+    $t = array(0,0,0,0);
+    $a = array( 'calories','fat','carbohydrates','protein','multiplier' );
+    $len = 0;
+    foreach( $r as $d )
+    {
+        $t[0] += $d['calories'];
+        $t[1] += $d['fat'];
+        $t[2] += $d['carbohydrates'];
+        $t[3] += $d['protein'];
+
+        $l = strlen( $d['food'] );
+        if ( $l > $len )
+            $len = $l;
+    }
+
+    if ( !$quiet ) {
+        $format = '%-'.$len.'s ';
+        foreach( $r as $d )
+        {
+            printf( $format, $d['food'] );
+            foreach ( $a as $v ) {
+                printf( '%5s,  ', (string)sprintf("%.1f",$d[$v]) );
+            }
+            echo "\n";
+        }
+    }
+
+    $s = $t[1]+$t[2]+$t[3]; $s=$s==0?1:$s;
+
+    if ( !$quiet )
+        echo line(58,true);
+
+    $format = '%-'.--$len.'s ';
+    printf( $format, "TOTAL: " ); 
+    for( $i = 0; $i < 4; $i++ ) {
+        printf( '%5s,  ', (string)sprintf("%.1f",$t[$i]) );
+        $t[$i] = $t[$i]/$s*100.0;
+    }
+
+    if ( !$quiet ) {
+        $len += 9;
+        $format = '%-'.++$len.'s ';
+        printf( $format, "\npercentages: " );
+
+        for( $i = 1; $i < 4; $i++ ) 
+            printf( '%5s,  ', (string)sprintf("%.1f%%",$t[$i]) );
+    }
+    echo "\n";
+}
+
+// summaries of days
+function list_day_totals( $verbose =false )
+{
+    if ( $verbose )
+        if ( strcmp($verbose, "-v")==0 )
+            $verbose = 1; // extra verbose
+        else if ( strcmp( $verbose,"-c")==0)
+            $verbose = 2; // print output formatted
+        else
+            $verbose = false;
+    
+
+    $c = get_config( 'current_day_id' );
+    if ( $c == -1 )
+    {
+        echo "no days started\n";
+        return;
+    }
+    
+    $r = dba( "select * from day where id = $c;" );
+
+    if ( $verbose != 2 )
+    {
+        echo "today: '".$r[0]['date'] ."' [id = $c]\n";
+        echo "                cal        fat       carb        pro   morning_weight\n";
+    }
+
+    $a = array( 1=>'calories',2=>'fat',3=>'carbohydrates',4=>'protein' );
+
+    $tots = array('calories'=>0,'weight'=>0,'booze'=>0);
+    $r = dba( "select * from day order by date asc;" );
+    $days = 0;
+    foreach( $r as $day )
+    {
+        $e = dba( "select * from eat where day_id = ".$day['id'].';' );
+        $t = array();
+        $drinking = 0;
+        foreach( $e as $f )
+        {
+            // for each food, get the totals from the 4 macronutrients
+            foreach( $a as $k=>$v )
+            {
+                $t[$v] += $f[$v];
+            }
+
+            if ($f['is_alcohol'] == 1) { 
+                $drinking = 1; 
+            }
+        }
+
+        $den = 0;
+        for ( $i = 2; $i <= 4; $i++ ) {
+            $den += $t[$a[$i]];
+        }
+
+        // print day totals
+        if ( $verbose != 2 )
+            printf( "%-2d %s  ", $day['id'], $day['date'] );
+
+        foreach( $a as $k=>$v )
+            if ( $v != 'calories' ) {
+                $per = ( $den != 0 ) ? $t[$v]/$den*100 : 0;
+                if ( $verbose == 2 ) 
+                    printf( "%4d, ", $t[$v] );
+                else
+                    printf( "%4d(%2d%%), ", $t[$v], $per );
+            } else
+                printf( "%4d, ", $t[$v] );
+
+        echo ' '.$day['weight']; 
+        if ( $verbose != 2 ) 
+            echo "lb";
+        else
+            echo ',';
+
+        if ( $drinking ) { 
+            echo $verbose == 2 ? "\t1,\n" : "\tboozed,\n";
+        } else {
+            echo $verbose == 2 ? "\t0,\n" : ",\n"; 
+        }
+
+        if ( $verbose==1 && !empty($day['notes']) ) {
+            echo "    \"".$day['notes']."\"\n\n";
+        }
+    
+        if ( $verbose == 2 ) {
+            $tots['calories'] += $t['calories']; 
+            $tots['weight'] += $day['weight'];
+            $tots['booze'] += $drinking;
+        }
+        ++$days;
+    }
+    if ( $verbose == 2 ) {
+        $days = (float)$days;
+        $dweek = ($tots['booze']/$days) * 7.0;
+        printf( "%.2f avg calories/day %6.2f %.1f%% (%.2f days a week)\n", $tots['calories']/$days,$tots['weight']/$days,$tots['booze']/$days*100,$dweek);
+    }
+}
+
+function edit_foods( $day =false )
+{
+    if ( $day )
+    {
+        if ( !is_numeric($day) )
+        {
+            echo "day argument is integer table id\n";
+            return;
+        }
+        $c = $day;
+    } 
+    else 
+    {
+        $c = get_config( 'current_day_id' );
+        if ( $c == -1 )
+        {
+            echo "no days started\n";
+            return;
+        }
+    }
+
+    $r = dba( "select * from day where id = $c;" );
+    if ( empty($r) ) {
+        echo "day not found\n";
+        return;
+    }
+
+    echo "remove a food eaten on: '".$r[0]['date'] ."' [id = $c]\n";
+    echo "                 cal   fat  carb   pro\n";
+
+    $a = array( 1=>'calories',2=>'fat',3=>'carbohydrates',4=>'protein' );
+
+    $eaten = dba( "select * from eat where day_id = ".$r[0]['id'].';' );
+
+    $len = 0;
+    foreach( $eaten as $k=>$e )
+    {
+        $l = strlen( $e['food'] );
+        if ( $l > $len ) $len = $l;
+    }
+    $format = '[%d] %-'.$len.'s ';
+    foreach( $eaten as $k=>$e )
+    {
+        $i = $k + 1;
+        printf( $format, $i, $e['food'] );
+        foreach( $a as $v )
+            printf( "%4d, ", $e[$v] );
+        echo "\n";
+    } 
+
+    echo "delete any of these (0 cancels)? ";
+    $m = trim(fread(STDIN,3));
+    if ( $m-- == 0 || strlen($m) == 0 )
+        return;
+
+    $id = $eaten[ $m ]['id'];
+    $s = "delete from eat where id = $id;";
+    echo "$s\n";
+    dba( $s );
+}
+
+function edit_single_food( $food )
+{
+    $food = trim($food);
+    if ( empty( $food ) ) {
+        echo "no food given\n";
+        return;
+    }
+
+    $r = query_food( $food, false );
+    if ( $r == 0 )
+        return;
+
+    $a = array( 'name'=>"'",'calories'=>'','fat'=>'','carbohydrates'=>'','protein'=>'','portion_desc'=>"'",'is_alcohol'=>'' );
+
+    foreach( $a as $v=>$q ) {
+        $$v = $r[$v];
+    }
+    
+    foreach( $a as $val=>$q )
+    {
+        echo "$val was \"".$$val."\". New? ";
+        $nval = trim(fread(STDIN, 100000));
+        if ( empty($nval) ) $nval = $r[$val];
+        printf("%c%c%s\n", 8,8, $nval );
+        $$val = $nval;
+    }
+
+    $s = "update food set ";
+    $x = '';
+    
+    $comma = '';
+    reset($a);
+    while ( ($q = current($a)) !== FALSE )
+    {
+        $val = key($a);
+        $s .= $comma.$val.' = '.$q.$$val.$q;
+        $comma=',';
+
+        next($a);
+    }
+    $s .= ' where id = '.$r['id'].';';
+    echo "$s\n";
+    dba($s);
+}
+
+function modify_food( $day =false )
+{
+    if ( $day )
+    {
+        if ( !is_numeric($day) )
+        {
+            echo "day argument is integer table id\n";
+            return;
+        }
+        $c = $day;
+    } 
+    else 
+    {
+        $c = get_config( 'current_day_id' );
+        if ( $c == -1 )
+        {
+            echo "no days started\n";
+            return;
+        }
+    }
+
+    $r = dba( "select * from day where id = $c;" );
+    if ( empty($r) ) {
+        echo "day not found\n";
+        return;
+    }
+
+    echo "modify multiplier of food eaten on: '".$r[0]['date'] ."' [id = $c]\n";
+    echo "                       multiplier\n";
+
+    $a = array( 'multiplier' );
+
+    $eaten = dba( "select * from eat where day_id = ".$r[0]['id'].';' );
+
+    $len = 0;
+    foreach( $eaten as $k=>$e )
+    {
+        $l = strlen( $e['food'] );
+        if ( $l > $len ) $len = $l;
+    }
+    $format = '[%d] %-'.$len.'s ';
+    foreach( $eaten as $k=>$e )
+    {
+        $i = $k + 1;
+        printf( $format, $i, $e['food'] );
+        foreach( $a as $v )
+            printf( "%.2f, ", $e[$v] );
+        echo "\n";
+    } 
+
+    echo "modify any of these (0 cancels)? ";
+    $m = trim(fread(STDIN,3));
+    if ( $m-- == 0 || strlen($m) == 0 )
+        return;
+
+    $mult = $eaten[ $m ]['multiplier'];
+    $fname = $eaten[ $m ]['food'];
+    echo "change '$fname' ($mult), new muliplier> ";
+    $mod = trim(fread(STDIN,15));
+    if ( empty($mod) )
+        return;
+
+    $food_id = $eaten[ $m ]['food_id'];
+    if ( empty($food_id) )
+        return;
+    $res = dba( "select * from food where id = $food_id;" );
+    $f =& $res[0];
+
+    $id = $eaten[ $m ]['id'];
+    $a = $f['calories'] * $mod;
+    $b = $f['fat'] * $mod;
+    $c = $f['carbohydrates'] * $mod;
+    $d = $f['protein'] * $mod;
+    $s = "update eat set calories=$a,fat=$b,carbohydrates=$c,protein=$d,multiplier=$mod where id = $id;";
+    echo "$s\n";
+    dba( $s );
+}
+
+function day_notes( $day =false, $ammend =false )
+{
+
+    if ( $ammend && strpos( $ammend, "-a" ) === 0 )
+        $ammend = true;
+    else if ( strpos($day,"-a") === 0 && strlen($day) == 2 ) {
+        $ammend = true;
+        $day = false;
+    }
+
+    if ( empty($day) )
+    {
+        $day_id = get_config( 'current_day_id' );
+        $res = dba( "select notes from day where id = $day_id;" );
+        if ( empty($res) ) {
+            echo "day not found\n"; return;
+        }
+    } 
+    else
+    {
+        $res = dba( "select notes from day where id = $day;" );
+        if ( empty($res) ) {
+            echo "no days started or bad day_id: $day\n"; return;
+        }
+        $day_id = $day;
+    }
+
+    $notes = trim($res[0]['notes']);
+
+    if ( $ammend ) 
+        echo "ammend existing notes (id $day_id)> \"$notes";
+    else
+        echo "old notes (id $day_id)> \"$notes\"\n\nnew notes (empty cancels)> ";
+
+    $newc = fread(STDIN,100000);
+    $newc = str_replace( array('"',"'","\n"),'', $newc );
+
+    $notes = $ammend ? $notes.$newc : $newc;
+
+    if ( empty($notes) ) {
+        echo "Cancel edit\n";
+        return;
+    }
+
+    $s = "update day set notes = '$notes' where id = $day_id";
+    echo "$s\n";
+    dba( $s );
+}
+
+function when_did_you_eat( $food )
+{
+    if ( empty( $food ) )
+    {
+        echo "what are you looking for?\n"; return;
+    }
+
+    $res = dba( "select * from eat where food like '%$food%' order by day_id asc;" );
+    if ( empty( $res ) ) 
+    {
+        echo "didn't eat that at all\n"; return;
+    }
+
+    $day_id = -1;
+    $last = -1;
+    foreach ( $res as $i )
+    {
+        $day_id = $i['day_id'];
+        $food = $i['food'];
+        $mul = $i['multiplier'];
+        //$time = $i['time'];
+
+        $x = dba( "select date from day where id = $day_id;" );
+        $date = $x[0]['date'];
+
+        if ( $day_id != $last )
+        {
+            echo "day '$date' [id = $day_id]\n";
+        }
+
+        echo "  $food\t$mul\n";
+
+        $last = $day_id;
+    }
+}
+
+
+//
+// ENTRY POINT
+//
+
+// no arguments, 
+if ( $argc < 2 )
+    print_help();
+    
+
+// test if db exists, if not create it
+if ( ! file_exists( $db_location ) )
+{
+    echo "Default database: \"$db_location\" doesn't exist.\n";
+    if ( file_exists( $db_loc_dir ) )
+    {
+        echo "do you want to create it? ";
+        if ( yesno() )
+        {
+            create_fresh_db();
+            usleep(500000);
+        }
+    }
+    else
+    {
+        echo "\"$db_loc_dir\" doesn't exist\n";
+        echo "Trying home dir: \"$db_temp_loc\"\n";
+        $db_location = $db_temp_loc;
+
+        if ( ! file_exists( $db_temp_loc ) )
+        {
+            echo "Default database: \"$db_location\" doesn't exist. Creating it.\n";
+            create_fresh_db();
+            usleep(500000);
+        }
+    }
+}
+
+echo "using: [$db_location]\n";
+
+
+//
+switch ( $argv[1] )
+{
+case "-f":
+    $food = empty( $argv[2] ) ? false : $argv[2];
+    list_stored_foods( $food );
+    break;
+case "add":
+case "-a":
+    if ( $argc > 2 && !empty($argv[2]) ) {
+        $food = $argv[ 2 ];
+        echo "Adding values for \"$food\":\n";
+    } else {
+        echo "Add a food> ";
+        $food = trim(fread(STDIN, 100000));
+    }
+    try_add_food( $food );
+    break;
+case "-d": // delete a food from stored foods
+    if ( $argc > 2 && !empty($argv[2]) ) {
+        $food = $argv[ 2 ];
+        echo "Deleting \"$food\":\n";
+    } else {
+        echo "food to delete> ";
+        $food = trim(fread(STDIN, 100000));
+    }
+    try_delete_food( $food );
+    break;
+case "new": // start new day
+    $day = empty( $argv[2] ) ? false : $argv[2];
+    $notes = empty( $argv[3] ) ? false : $argv[3];
+    start_new_day( $day, $notes );
+    break;
+case "drink":
+case "eat": // argument is a food, potentially new one
+    if ( $argc < 3 || empty($argv[2]) ) {
+        echo "eat what?\n";
+        return;
+    }
+    $mult = empty( $argv[3] ) ? false : $argv[3];
+    $day = empty( $argv[4] ) ? false : $argv[4];
+    eat_food( $argv[2], $mult, $day );
+    break;
+case "list":
+case "-l": // list foods you had today, & totals, or for a specific day
+case "l":
+    $day = empty( $argv[2] ) ? false : $argv[2];
+    $v = empty( $argv[3] ) ? false : $argv[3];
+    list_foods_today( $day, $v );
+    break;
+case "d":
+case "days":
+    $verbosity = empty( $argv[2] ) ? false : $argv[2];
+    list_day_totals( $verbosity );
+    break;
+case "-e": // delete food eaten on current day, (or specified)
+    $day = empty( $argv[2] ) ? false : $argv[2];
+    edit_foods( $day );
+    break;
+case "-r": // edit a food
+    $food = empty( $argv[2] ) ? false : $argv[2];
+    edit_single_food( $food );
+    break;
+case "find":
+    $food = empty( $argv[2] ) ? false : $argv[2];
+    $i = 3; while ( isset( $argv[$i] ) && $i < 20 ) { $food .= " ".$argv[$i++]; }
+    if ( !$food )
+        break;
+    $str = 'http://fatsecret.com/calories-nutrition/search?q='.rawurlencode($food);
+    if ( isset( $_SERVER["XDG_CONFIG_DIRS"] ) )
+        `xdg-open $str`;
+    else /* TODO: put check for Mac here, and have else write error */
+        `open $str`;
+    break;
+case "-m":
+    $day = empty( $argv[2] ) ? false : $argv[2];
+    modify_food( $day );
+    break;
+case "-n":
+    $day = empty( $argv[2] ) ? false : $argv[2];
+    $amend = empty( $argv[3] ) ? false : $argv[3];
+    day_notes( $day, $amend );
+    break;
+case "-w":
+case "when":
+    $food = empty( $argv[2] ) ? false : $argv[2];
+    when_did_you_eat( $food );
+    break;
+default: // adding food
+    print_help();
+    break;
+}
+
+
