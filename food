@@ -24,11 +24,16 @@ $db_name = 'food_diary.db3';
 //
 // Put the path you want your database file stored at here
 //
+// Linux 
+//$db_loc_dir  = '/home/<username>/.food/';
+// Mac/Windows 
+//$db_loc_dir  = '/Users/<username>/.food/';
 
-// Mac or Lin
-//$db_loc_dir  = '/home/gnaughto/.logs/sqlite/';
-//$db_loc_dir  = '/Volumes/encrypted/logs/sqlite/';
-$db_loc_dir  = '/home/gnaughto/Private/logs/sqlite/';
+
+if ( empty($db_loc_dir) ) { 
+    echo 'Please set database location directory ($db_loc_dir) before proceeding'."\n";
+    exit;
+}
 
 // Guided location
 $db_location = $db_loc_dir.$db_name;
@@ -36,8 +41,13 @@ $db_location = $db_loc_dir.$db_name;
 //
 // Put your home directory here
 //
-//$db_home_dir = '/Users/gnaughto/';
-$db_home_dir = '/home/gnaughto/';
+//$db_home_dir = '/Users/<YOUR_LOGIN>/';
+//$db_home_dir = '/home/<YOUR_LOGIN>/';
+
+if ( empty($db_home_dir) ) { 
+    echo 'Please set home directory ($db_home_dir) before proceeding'."\n";
+    exit;
+}
 
 
 
